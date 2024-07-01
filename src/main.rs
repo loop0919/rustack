@@ -1,29 +1,34 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    io::{BufRead, BufReader},
+};
 
-struct Vm<'src> {
-    stack: Vec<Value<'src>>,
-    vars: HashMap<&'src str, Value<'src>>,
+struct Vm {
+    stack: Vec<Value>,
+    vars: HashMap<String, Value>,
+    blocks: Vec<Vec<Value>>,
 }
 
-impl<'src> Vm<'src> {
+impl Vm {
     fn new() -> Self {
         Self {
             stack: vec![],
             vars: HashMap::new(),
+            blocks: vec![],
         }
     }
 }
 
 
-#[derive(Debug, PartialEq, Eq)]
-enum Value<'src> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Value {
     Num(i64),
-    Op(&'src str),
-    Sym(&'src str),
-    Block(Vec<Value<'src>>),
+    Op(String),
+    Sym(String),
+    Block(Vec<Value>),
 }
 
-impl<'src> Value<'src> {
+impl Value {
     fn as_num(&self) -> i64 {
         match self {
             Self::Num(val) => *val,
@@ -31,142 +36,166 @@ impl<'src> Value<'src> {
         }
     }
 
-    fn to_block(self) -> Vec<Value<'src>> {
+    fn as_sym(&self) -> String {
+        if let Self::Sym(sym) = self {
+            sym.clone()
+        } else {
+            panic!("Value is not a symbol");
+        }
+    }
+
+    fn to_block(self) -> Vec<Value> {
         match self {
             Self::Block(val) => val,
             _ => panic!("Value is not a block"),
+        }
+    }
+
+    fn to_string(&self) -> String {
+        match self {
+            Self::Num(i) => i.to_string(),
+            Self::Op(ref s) | Self::Sym(ref s) => s.clone(),
+            Self::Block(_) => "<Block>".to_string(),
         }
     }
 }
 
 
 fn main() {
-    for line in std::io::stdin().lines() {
-        if let Ok(line) = line {
-            let stack = parse(&line);
-            println!("stack: {stack:?}");
+    if let Some(f) = std::env::args()
+        .nth(1)
+        .and_then(|f| std::fs::File::open(f).ok())
+        {
+            parse_batch(BufReader::new(f));
+        } else {
+            parse_interactive();
         }
-    }
 }
 
-fn parse<'a>(line: &'a str) -> Vec<Value> {
+fn parse_batch(source: impl BufRead) -> Vec<Value> {
     let mut vm = Vm::new();
-    let input: Vec<_> = line.split(" ").collect();
-    let mut words = &input[..];
-
-    while let Some((&word, mut rest)) = &words.split_first() {
-        if word.is_empty() {
-            break;
+    for line in source.lines().flatten() {
+        for word in line.split(" ") {
+            parse_word(word, &mut vm);
         }
-        if word == "{" {
-            let value;
-            (value, rest) = parse_block(rest);
-            vm.stack.push(value);
-        } else {
-            let code = if let Ok(num) = word.parse::<i64>() {
-                Value::Num(num)
-            } else if word.starts_with("$") { 
-                Value::Sym(&word[1..])
-            }else {
-                Value::Op(word)
-            };
-
-            eval(code, &mut vm.stack);
-        }
-        words = rest;
     }
     vm.stack
 }
 
-fn parse_block<'src, 'a>(input: &'a [&'src str]) -> (Value<'src>, &'a [&'src str]) {
-    let mut tokens = vec![];
-    let mut words = input;
-
-    while let Some((&word, mut rest)) = words.split_first() {
-        if word.is_empty() {
-            break;
+fn parse_interactive() {
+    let mut vm = Vm::new();
+    for line in std::io::stdin().lines().flatten() {
+        for word in line.split(" ") {
+            parse_word(word, &mut vm);
         }
-
-        if word == "{" {
-            let value;
-            (value, rest) = parse_block(rest);
-            tokens.push(value);
-        } else if word == "}" {
-            return (Value::Block(tokens), rest);
-        } else if let Ok(value) = word.parse::<i64>() {
-            tokens.push(Value::Num(value));
-        } else {
-            tokens.push(Value::Op(word));
-        }
-
-        words = rest;
+        println!("stack: {:?}", vm.stack);
     }
-
-    (Value::Block(tokens), words)
 }
 
-fn eval<'src>(code: Value<'src>, vm: &mut Vm<'src>) {
+fn parse_word(word: &str, vm: &mut Vm) {
+    if word.is_empty() {
+        return;
+    }
+    if word == "{" {
+        vm.blocks.push(vec![]);
+    } else if word == "}" {
+        let top_block = vm.blocks.pop().expect("Block stack underrun!");
+        eval(Value::Block(top_block), vm);
+    } else {
+        let code = if let Ok(num) = word.parse::<i64>() {
+            Value::Num(num)
+        } else if word.starts_with("$") { 
+            Value::Sym(word[1..].to_string())
+        }else {
+            Value::Op(word.to_string())
+        };
+
+        eval(code, vm);
+    }
+}
+
+fn eval(code: Value, vm: &mut Vm) {
+    if let Some(top_block) = vm.blocks.last_mut() {
+        top_block.push(code);
+        return;
+    }
     match code {
-        Value::Op(op) => match op {
+        Value::Op(ref op) => match op as &str {
             "+" => add(&mut vm.stack),
             "-" => sub(&mut vm.stack),
             "*" => mul(&mut vm.stack),
             "/" => div(&mut vm.stack),
-            "if" => op_if(&mut vm.stack),
-            _ => panic!("{op:?} could not be parsed"),
+
+            "<" => lt(&mut vm.stack),
+            "<=" => le(&mut vm.stack),
+            ">" => gt(&mut vm.stack),
+            ">=" => ge(&mut vm.stack),
+            "==" => eq(&mut vm.stack),
+            "!=" => neq(&mut vm.stack),
+
+            "def" => op_def(vm),
+            "if" => op_if(vm),
+            _ => {
+                let val = vm.vars.get(op).expect(&format!(
+                    "{op:?} is not a difined operation"
+                ));
+                vm.stack.push(val.clone());
+            },
         }
-        _ => vm.stack.push(code),
+        _ => vm.stack.push(code.clone()),
     }
 }
 
-fn add(stack: &mut Vec<Value>) {
-    let lhs = stack.pop().unwrap().as_num();
-    let rhs = stack.pop().unwrap().as_num();
-    stack.push(Value::Num(lhs + rhs));
+macro_rules! impl_op {
+    {$name:ident, $op:tt} => {
+        fn $name(stack: &mut Vec<Value>) {
+            let rhs = stack.pop().unwrap().as_num();
+            let lhs = stack.pop().unwrap().as_num();
+            stack.push(Value::Num((lhs $op rhs) as i64));
+        }
+    }
+}
+impl_op!(add, +);
+impl_op!(sub, -);
+impl_op!(mul, *);
+impl_op!(div, /);
+
+impl_op!(lt, <);
+impl_op!(le, <=);
+impl_op!(gt, >);
+impl_op!(ge, >=);
+impl_op!(eq, ==);
+impl_op!(neq, !=);
+
+
+
+fn op_def(vm: &mut Vm) {
+    let value = vm.stack.pop().unwrap();
+    eval(value, vm);
+    let value = vm.stack.pop().unwrap();
+    let sym = vm.stack.pop().unwrap().as_sym();
+
+    vm.vars.insert(sym, value);
 }
 
-fn sub(stack: &mut Vec<Value>) {
-    let lhs = stack.pop().unwrap().as_num();
-    let rhs = stack.pop().unwrap().as_num();
-    stack.push(Value::Num(lhs - rhs));
-}
-
-fn mul(stack: &mut Vec<Value>) {
-    let lhs = stack.pop().unwrap().as_num();
-    let rhs = stack.pop().unwrap().as_num();
-    stack.push(Value::Num(lhs * rhs));
-}
-
-fn div(stack: &mut Vec<Value>) {
-    let lhs = stack.pop().unwrap().as_num();
-    let rhs = stack.pop().unwrap().as_num();
-    stack.push(Value::Num(lhs / rhs));
-}
-
-fn def(stack: &mut Vec<Value>) {
-    let lhs = stack.pop().unwrap().as_num();
-    let rhs = stack.pop().unwrap().as_num();
-    
-}
-
-fn op_if(stack: &mut Vec<Value>) {
-    let false_branch = stack.pop().unwrap().to_block();
-    let true_branch = stack.pop().unwrap().to_block();
-    let cond = stack.pop().unwrap().to_block();
+fn op_if(vm: &mut Vm) {
+    let false_branch = vm.stack.pop().unwrap().to_block();
+    let true_branch = vm.stack.pop().unwrap().to_block();
+    let cond = vm.stack.pop().unwrap().to_block();
 
     for code in cond {
-        eval(code, stack);
+        eval(code, vm);
     }
 
-    let cond_result = stack.pop().unwrap().as_num();
+    let cond_result = vm.stack.pop().unwrap().as_num();
 
     if cond_result != 0 {
         for code in true_branch {
-            eval(code, stack);
+            eval(code, vm);
         }
     } else {
         for code in false_branch {
-            eval(code, stack);
+            eval(code, vm);
         }
     }
 }
@@ -179,8 +208,8 @@ mod test {
     #[test]
     fn test_if_false() {
         assert_eq!(
-            parse("{ 6 2 3 * - } { 100 } { -100 } if"),
-            vec![Num(-100)]
+            parse("{ 1 2 == } { 998244353 } { 0 } if"),
+            vec![Num(0)],
         );
     }
 
@@ -188,7 +217,15 @@ mod test {
     fn test_if_true() {
         assert_eq!(
             parse("{ 1 1 + } { 100 } { -100 } if"),
-            vec![Num(100)]
+            vec![Num(100)],
+        );
+    }
+
+    #[test]
+    fn test_var() {
+        assert_eq!(
+            parse("$x 20 def $y x 10 - def { x y >= } { y } { x } if"),
+            vec![Num(10)],
         );
     }
 }
