@@ -18,4 +18,14 @@ $fib {
     if
 } def
 
-10 fib puts
+$call {
+    $x exch def
+    { x 1 < }
+    { }
+    { 
+        x fib puts 
+        x 1 + call
+    } if
+} def
+
+15 call

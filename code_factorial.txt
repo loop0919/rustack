@@ -8,11 +8,12 @@ $factorial_int {
     { n 2 < }
     { acc }
     {
-            n 1 -
-            acc n *
-            factorial_int
+        n 1 -
+        acc n *
+        factorial_int
     } if
 } def
 
-#5!を計算する
-5 factorial puts #puts=出力する
+#10!を計算する
+10 puts
+10 factorial puts #puts=出力する
